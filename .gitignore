@@ -1,5 +1,5 @@
-gesture_venv/
 .env
-.streamlit/secrets.toml
+venv/
+gesture_venv/
 __pycache__/
 *.pyc
