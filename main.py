@@ -1,7 +1,5 @@
 import streamlit as st
-import requests
-import json
-from types import SimpleNamespace
+from openai import OpenAI
 import html
 import ast
 import operator as op
@@ -27,159 +25,13 @@ st.set_page_config(
 # GROQ / OPENAI CLIENT
 # ============================================================
 
-# Direct Groq REST client. This avoids requiring the `openai` Python package.
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-
-
-def load_groq_api_key():
-    """Load the Groq key without crashing if Streamlit secrets are absent.
-
-    Priority: Streamlit secrets -> environment variable -> local .env file.
-    The .env reader is intentionally tiny so python-dotenv is not required.
-    """
-    # 1) Streamlit secrets
-    try:
-        key = st.secrets.get("GROQ_API_KEY")
-        if key:
-            return str(key).strip()
-    except Exception:
-        pass
-
-    # 2) Environment variable
-    import os
-    key = os.getenv("GROQ_API_KEY")
-    if key:
-        return key.strip()
-
-    # 3) Local .env file
-    for env_path in (".env",):
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    name, value = line.split("=", 1)
-                    if name.strip() == "GROQ_API_KEY":
-                        value = value.strip().strip('\"').strip("'")
-                        if value:
-                            return value
-        except (OSError, UnicodeError):
-            pass
-
-    return None
-
-
-GROQ_API_KEY = load_groq_api_key()
-
-
-class GroqClient:
-    def __init__(self, api_key, base_url=GROQ_BASE_URL):
-        self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
-        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._chat_create))
-        self.audio = SimpleNamespace(
-            transcriptions=SimpleNamespace(create=self._transcription_create)
-        )
-
-    def _headers(self):
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-    def _chat_create(self, model, messages, stream=False, **kwargs):
-        if not self.api_key:
-            raise RuntimeError("Groq API key is missing. Add GROQ_API_KEY to .env / Streamlit secrets or enter it in the sidebar.")
-
-        payload = {"model": model, "messages": messages}
-        payload.update(kwargs)
-
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers=self._headers(),
-            json=payload,
-            stream=stream,
-            timeout=120,
-        )
-
-        if response.status_code >= 400:
-            try:
-                error = response.json().get("error", {})
-                message = error.get("message", response.text)
-            except Exception:
-                message = response.text
-            raise RuntimeError(f"Groq API error ({response.status_code}): {message}")
-
-        if not stream:
-            data = response.json()
-            choices = data.get("choices", [])
-            if not choices:
-                raise RuntimeError("Groq returned an empty response.")
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content=choices[0].get("message", {}).get("content", "")
-                        )
-                    )
-                ]
-            )
-
-        def generate():
-            for line in response.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
-                if line.startswith("data:"):
-                    data_line = line[5:].strip()
-                    if data_line == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_line)
-                        choices = data.get("choices", [])
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta", {}) or {}
-                        content = delta.get("content")
-                        yield SimpleNamespace(
-                            choices=[SimpleNamespace(delta=SimpleNamespace(content=content))]
-                        )
-                    except json.JSONDecodeError:
-                        continue
-
-        return generate()
-
-    def _transcription_create(self, model, file, language=None, **kwargs):
-        if not self.api_key:
-            raise RuntimeError("Groq API key is missing. Add GROQ_API_KEY to .env / Streamlit secrets or enter it in the sidebar.")
-
-        files = {"file": file}
-        data = {"model": model}
-        if language:
-            data["language"] = language
-        data.update(kwargs)
-
-        response = requests.post(
-            f"{self.base_url}/audio/transcriptions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            files=files,
-            data=data,
-            timeout=120,
-        )
-
-        if response.status_code >= 400:
-            try:
-                error = response.json().get("error", {})
-                message = error.get("message", response.text)
-            except Exception:
-                message = response.text
-            raise RuntimeError(f"Groq API error ({response.status_code}): {message}")
-
-        data = response.json()
-        return SimpleNamespace(text=data.get("text", ""))
-
-
-client = GroqClient(GROQ_API_KEY) if GROQ_API_KEY else None
+try:
+    client = OpenAI(
+        api_key=st.secrets["GROQ_API_KEY"],
+        base_url="https://api.groq.com/openai/v1",
+    )
+except Exception:
+    client = None
 
 MODEL = "openai/gpt-oss-20b"
 
@@ -230,7 +82,7 @@ def split_into_chunks(text, chunk_size=CODE_CHUNK_CHARS):
 
 def ask_ai(user_text, system=None):
     if client is None:
-        return "Please enter your Groq API key in the sidebar or add GROQ_API_KEY to .env / Streamlit secrets."
+        return "⚠️ GROQ_API_KEY is missing. Please check your Streamlit secrets."
 
     try:
         messages = []
@@ -276,7 +128,7 @@ def ask_ai_stream(user_text, system=None):
     as it arrives, instead of waiting for the full response."""
 
     if client is None:
-        yield "Please enter your Groq API key in the sidebar or add GROQ_API_KEY to .env / Streamlit secrets."
+        yield "⚠️ GROQ_API_KEY is missing. Please check your Streamlit secrets."
         return
 
     messages = []
@@ -339,7 +191,7 @@ VISION_MODELS = ["qwen/qwen3.8-27b"]
 
 def ask_ai_vision(image_bytes, mime_type, user_text, system=None):
     if client is None:
-        return "Please enter your Groq API key in the sidebar or add GROQ_API_KEY to .env / Streamlit secrets."
+        return "⚠️ GROQ_API_KEY is missing. Please check your Streamlit secrets."
 
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{mime_type};base64,{b64_image}"
@@ -918,23 +770,6 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    # If the key was not found in secrets/.env/environment, allow the user
-    # to enter it locally. The key is never printed back to the page.
-    if not GROQ_API_KEY:
-        sidebar_key = st.text_input(
-            "Groq API key",
-            type="password",
-            placeholder="Paste your Groq API key",
-            help="You can also put GROQ_API_KEY in .streamlit/secrets.toml or .env.",
-            key="groq_api_key_input",
-        ).strip()
-        if sidebar_key:
-            GROQ_API_KEY = sidebar_key
-            client = GroqClient(GROQ_API_KEY)
-            st.success("Groq API connected.")
-    else:
-        st.caption("✓ Groq API connected")
-
     pages = [
         "Home",
         "See",
@@ -981,6 +816,19 @@ with st.sidebar:
 
         st.markdown("---")
 
+    st.markdown(
+        """
+        <div class="small-note">
+        ✨ Learn<br>
+        💡 Solve<br>
+        🎨 Create<br>
+        💬 Talk<br>
+        📄 Understand<br>
+        💻 Code
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
